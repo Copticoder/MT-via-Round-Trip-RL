@@ -354,7 +354,7 @@ def train(config: DictConfig):
                         )  # (B, world*num_return_sequences, L)
 
                         # Compute GRPO loss on rank 0 and update
-                        loss, logs = grpo_compute_loss_and_logs(
+                        loss_src, logs_src = grpo_compute_loss_and_logs(
                             model,
                             ref_model,
                             tokenizer,
@@ -368,7 +368,20 @@ def train(config: DictConfig):
                         )
 
                         optimizer.zero_grad()
-                        loss.backward()
+                        loss_src.backward()
+                        loss_tgt, logs_tgt = grpo_compute_loss_and_logs(
+                            model,
+                            ref_model,
+                            tokenizer,
+                            generated_all,
+                            src_prompt_cpu,
+                            ground_truths,
+                            end_of_sentence_token_id=tokenizer.eos_token_id,
+                            beta=beta,
+                            clip_param=clip_param,
+                            tgt_lang_id=tokenizer.convert_tokens_to_ids(config.task.data.source_lang),
+                        )
+                        loss_tgt.backward()
 
                         # Compute global gradient L2 norm (rank 0 only)
                         grad_norm = 0.0
