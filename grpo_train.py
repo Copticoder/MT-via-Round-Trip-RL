@@ -358,7 +358,7 @@ def get_model(config: DictConfig):
         model_cfg.name,
     )
     model = AutoModelForSeq2SeqLM.from_pretrained(
-        model_cfg.name, attn_implementation="flash_attention_2", dtype=torch.bfloat16
+        model_cfg.name
     )
 
     use_lora = bool(getattr(model_cfg, "use_lora", False))

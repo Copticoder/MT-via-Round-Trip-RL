@@ -7,7 +7,8 @@ data:
   dataset_config_name: "eng_Latn-ayr_Latn"
 
 model:
-  name: "facebook/nllb-200-distilled-600M"
+  name: "facebook/nllb-200-distilled-1.3B"
+  # name: "facebook/nllb-200-distilled-600M"
   # name: "facebook/nllb-200-3.3B"
   use_lora: false
   lora:
@@ -19,18 +20,18 @@ model:
       - v_proj
 
 training:
-  lr: 0.00007
+  lr: 0.00002
   accumulate_grad_batches: 1
   epochs: 5
   batch_size: 6
   num_return_sequences: 5
-  updates_per_batch: 25
-  gen_temperature: 0.9
+  updates_per_batch: 30
+  gen_temperature: 1.6
   beta: 0.04
   clip_param: 0.2
   top_k: 100
   top_p: 0.95
-
+  
 eval:
   run: true
   only: false
@@ -45,4 +46,4 @@ reward:
 
 constraints:
   min_sentence_len: 1
-  max_sentence_len: 256
+  max_sentence_len: 64
