@@ -145,7 +145,7 @@ def train(config: DictConfig):
     # Initialize Weights & Biases
     wandb.init(
         project="grpo-translation-nllb-multi-domain",
-        name="25-gradient-steps-600m-outcome-reward-batch-6",
+        name="50-gradient-steps-600m-process-reward-batch-1",
         config=OmegaConf.to_container(config, resolve=True),
         dir="/root/wandb",
     )
