@@ -5,6 +5,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import evaluate
+from sacrebleu.metrics import CHRF
 from tqdm.auto import tqdm
 from transformers import (
     AutoTokenizer,
@@ -66,7 +67,10 @@ def _run_evaluation(
     with torch.no_grad():
         with tqdm(total=total_batches, desc="Evaluating", leave=False) as pbar:
             for idx, batch in enumerate(val_loader):
-                encoder_inputs, ground_truths, sample_ids = batch
+                if len(batch) == 4:
+                    encoder_inputs, ground_truths, _, sample_ids = batch
+                else:
+                    encoder_inputs, ground_truths, sample_ids = batch
                 if isinstance(ground_truths, str):
                     ground_truths = [ground_truths]
                 else:
@@ -98,14 +102,10 @@ def _run_evaluation(
         )
         results["eval/bleu"] = float(bleu_res.get("score", 0.0))
     if predictions and "chrf++" in requested_metrics:
-        chrf_metric = evaluate.load("chrf")
-        chrf_res = chrf_metric.compute(
-            predictions=predictions,
-            references=[[r] for r in references],
-            char_order=6,
-            word_order=2,
-        )
-        results["eval/chrf++"] = float(chrf_res.get("score", 0.0))
+        chrf_metric = CHRF(word_order=2, char_order=6)
+        # sacrebleu expects references as list of reference sets
+        score = chrf_metric.corpus_score(hypotheses=predictions, references=[references]).score
+        results["eval/chrf++"] = float(score)
 
     if results:
         print("Evaluation results:")
