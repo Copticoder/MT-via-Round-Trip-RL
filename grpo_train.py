@@ -190,6 +190,7 @@ def train(config: DictConfig):
     gen_temperature = float(getattr(config.task.training, "gen_temperature", 1.3))
     beta = float(getattr(config.task.training, "beta", 0.04))
     clip_param = float(getattr(config.task.training, "clip_param", 0.2))
+    max_grad_norm = float(getattr(config.task.training, "max_grad_norm", 1.0))
     tgt_lang_id = tokenizer.convert_tokens_to_ids(config.task.data.target_lang)
 
     # Optimizer setup
@@ -270,7 +271,20 @@ def train(config: DictConfig):
                     optimizer.zero_grad()
                     loss.backward()
 
-                    # Compute gradient L2 norm for logging
+                    # Compute gradient L2 norm, clip, then recompute for logging
+                    grad_norm_preclip = 0.0
+                    with torch.no_grad():
+                        grads = [
+                            p.grad.detach().float().norm(2)
+                            for p in model.parameters()
+                            if p.requires_grad and p.grad is not None
+                        ]
+                        if grads:
+                            grad_norm_preclip = torch.norm(torch.stack(grads), 2).item()
+
+                    if max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+
                     grad_norm = 0.0
                     with torch.no_grad():
                         grads = [
@@ -287,7 +301,7 @@ def train(config: DictConfig):
                         print(
                             f"[epoch {epoch}] step {step_idx} | loss={logs['loss'].item():.4f} "
                             f"kl={logs['kl'].item():.4f} reward={logs['reward'].item():.4f} "
-                            f"chrf={logs['chrf'].item():.4f} gradient_norm={grad_norm:.4f}"
+                            f"chrf={logs['chrf'].item():.4f} grad_pre={grad_norm_preclip:.4f} grad_clip={grad_norm:.4f}"
                         )
                         # Print the reference and one generated sequence for inspection
                         best_candidates = []
@@ -306,6 +320,7 @@ def train(config: DictConfig):
                                 "train/loss": float(logs["loss"].item()),
                                 "train/kl": float(logs["kl"].item()),
                                 "train/chrf": float(logs["chrf"].item()),
+                                "train/gradient_norm_preclip": float(grad_norm_preclip),
                                 "train/gradient_norm": float(grad_norm),
                             }
                         )

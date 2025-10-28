@@ -20,15 +20,16 @@ model:
       - v_proj
 
 training:
-  lr: 0.000005
+  lr: 0.000002
   accumulate_grad_batches: 1
   epochs: 5
   batch_size: 4
-  num_return_sequences: 8
+  num_return_sequences: 6
   updates_per_batch: 50
   gen_temperature: 2.0
   beta: 0.04
   clip_param: 0.2
+  max_grad_norm: 10.0
   top_k: 100
   top_p: 0.95
   
