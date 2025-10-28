@@ -145,7 +145,7 @@ def train(config: DictConfig):
     # Initialize Weights & Biases
     wandb.init(
         project="grpo-translation-nllb-multi-domain",
-        name="50-gradient-steps-600m-process-reward-batch-1",
+        name="50-gradient-steps-1.3B-process-reward-batch-6",
         config=OmegaConf.to_container(config, resolve=True),
         dir="/root/wandb",
     )
@@ -213,6 +213,18 @@ def train(config: DictConfig):
             step_idx = 0
 
             for batch in train_loader:
+                if run_eval:
+                    eval_every_n_batches = int(getattr(eval_cfg, "every_n_batches", 0))
+                    if eval_every_n_batches > 0 and (step_idx % eval_every_n_batches == 0):
+                        _run_evaluation(
+                            model,
+                            tokenizer,
+                            data,
+                            eval_cfg,
+                            tgt_lang_id=tgt_lang_id,
+                            device=device,
+                            max_new_tokens=max_new_tokens,
+                        )
                 src_prompt, ground_truths, sample_ids = batch
                 encoder_inputs = {k: v.to(device, non_blocking=True) for k, v in src_prompt.items()}
                 batch_size = encoder_inputs["input_ids"].size(0)
@@ -297,6 +309,8 @@ def train(config: DictConfig):
                                 "train/gradient_norm": float(grad_norm),
                             }
                         )
+                    step_idx += 1
+                    
                         # if train_table is not None:
                         #     for reference, decoded, ref_sample_id in best_candidates:
                         #         train_table.add_data(
@@ -307,20 +321,6 @@ def train(config: DictConfig):
                         #     wandb.log({"train/Translations": train_table}, step=step_idx)
 
                     # Optional periodic evaluation every N updates
-                    if run_eval:
-                        eval_every_n_batches = int(getattr(eval_cfg, "every_n_batches", 0))
-                        if eval_every_n_batches > 0 and step_idx > 0 and (step_idx % eval_every_n_batches == 0):
-                            _run_evaluation(
-                                model,
-                                tokenizer,
-                                data,
-                                eval_cfg,
-                                tgt_lang_id=tgt_lang_id,
-                                device=device,
-                                max_new_tokens=max_new_tokens,
-                            )
-
-                    step_idx += 1
 
             # Refresh reference model at epoch boundaries
             ref_model = copy.deepcopy(model).to(device)
