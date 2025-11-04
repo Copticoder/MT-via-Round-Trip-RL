@@ -28,6 +28,7 @@ def _run_evaluation(
     tgt_lang_id: int,
     device: torch.device,
     max_new_tokens: int,
+    use_wandb: bool = False,
 ):
     if eval_cfg is None:
         return {}
@@ -112,7 +113,7 @@ def _run_evaluation(
         for key, value in results.items():
             print(f"  {key}: {value:.4f}")
 
-    if wandb.run is not None and (results or sample_records):
+    if use_wandb and wandb.run is not None and (results or sample_records):
         log_payload = results.copy()
         # if sample_records:
         #     eval_table = wandb.Table(columns=["reference", "generated", "sample_id"], log_mode="MUTABLE")
@@ -142,15 +143,24 @@ def train(config: DictConfig):
         run_eval = True
     run_training = not eval_only
 
+    # Logging configuration
+    logging_cfg = getattr(config.task, "logging", None)
+    use_wandb = bool(getattr(logging_cfg, "use_wandb", False)) if logging_cfg is not None else False
+    log_every_n_steps = int(getattr(logging_cfg, "log_every_n_steps", 10)) if logging_cfg is not None else 10
+
     # Initialize Weights & Biases
-    wandb.init(
-        project="grpo-translation-nllb-multi-domain",
-        name="50-gradient-steps-1.3B-process-reward-batch-6",
-        config=OmegaConf.to_container(config, resolve=True),
-        dir="/root/wandb",
-    )
+    if use_wandb:
+        wandb_project = getattr(logging_cfg, "wandb_project", "grpo-translation")
+        wandb_name = getattr(logging_cfg, "wandb_name", None)
+        wandb_dir = getattr(logging_cfg, "wandb_dir", None)
+        wandb.init(
+            project=wandb_project,
+            name=wandb_name,
+            config=OmegaConf.to_container(config, resolve=True),
+            dir=wandb_dir,
+        )
     train_table = None
-    if run_training:
+    if run_training and use_wandb:
         train_table = wandb.Table(columns=["reference", "generated", "sample_id"], log_mode="MUTABLE")
     # Reference model (frozen copy of the policy)
     reference_name = getattr(config.task.model, "reference_name", None)
@@ -225,11 +235,12 @@ def train(config: DictConfig):
                             tgt_lang_id=tgt_lang_id,
                             device=device,
                             max_new_tokens=max_new_tokens,
+                            use_wandb=use_wandb,
                         )
                 src_prompt, ground_truths, sample_ids = batch
                 encoder_inputs = {k: v.to(device, non_blocking=True) for k, v in src_prompt.items()}
                 batch_size = encoder_inputs["input_ids"].size(0)
-
+                chrf_means = []
                 for _ in range(updates_per_batch):
                     # Generate candidate sequences with current policy
                     generated_local = grpo_generate_sequences(
@@ -267,7 +278,9 @@ def train(config: DictConfig):
                         clip_param=clip_param,
                         tgt_lang_id=tgt_lang_id,
                     )
-
+                    # append the chrf means to watch when to force ground truth tokens to the model
+                    chrf_means.append(logs["chrf_means"].item())
+                    
                     optimizer.zero_grad()
                     loss.backward()
 
@@ -297,7 +310,7 @@ def train(config: DictConfig):
 
                     optimizer.step()
 
-                    if step_idx % int(getattr(config.task.training, "log_every_n_steps", 10)) == 0:
+                    if step_idx % log_every_n_steps == 0:
                         print(
                             f"[epoch {epoch}] step {step_idx} | loss={logs['loss'].item():.4f} "
                             f"kl={logs['kl'].item():.4f} reward={logs['reward'].item():.4f} "
@@ -315,15 +328,16 @@ def train(config: DictConfig):
                         print(f"Generated[{ref_sample_id}]: {gen_text}")
 
                         # Log to Weights & Biases
-                        wandb.log(
-                            {
-                                "train/loss": float(logs["loss"].item()),
-                                "train/kl": float(logs["kl"].item()),
-                                "train/chrf": float(logs["chrf"].item()),
-                                "train/gradient_norm_preclip": float(grad_norm_preclip),
-                                "train/gradient_norm": float(grad_norm),
-                            }
-                        )
+                        if use_wandb:
+                            wandb.log(
+                                {
+                                    "train/loss": float(logs["loss"].item()),
+                                    "train/kl": float(logs["kl"].item()),
+                                    "train/chrf": float(logs["chrf"].item()),
+                                    "train/gradient_norm_preclip": float(grad_norm_preclip),
+                                    "train/gradient_norm": float(grad_norm),
+                                }
+                            )
                     step_idx += 1
                     
                         # if train_table is not None:
@@ -352,6 +366,7 @@ def train(config: DictConfig):
             tgt_lang_id=tgt_lang_id,
             device=device,
             max_new_tokens=max_new_tokens,
+            use_wandb=use_wandb,
         )
 
     # Save final model when training occurred
@@ -361,7 +376,7 @@ def train(config: DictConfig):
         model.save_pretrained(save_dir)
         tokenizer.save_pretrained(save_dir)
 
-    if wandb.run is not None:
+    if use_wandb and wandb.run is not None:
         wandb.finish()
 
 

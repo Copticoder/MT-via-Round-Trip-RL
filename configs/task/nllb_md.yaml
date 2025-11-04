@@ -21,6 +21,10 @@ model:
 
 training:
   lr: 0.000002
+  force_ground_truth:
+    enabled: true
+    patience: 3
+    min_improvement: 1e-4
   accumulate_grad_batches: 1
   epochs: 5
   batch_size: 4
@@ -38,6 +42,13 @@ eval:
   only: false
   translation_metric: ["chrf++"]
   every_n_batches: 50
+
+logging:
+  use_wandb: true
+  wandb_project: "grpo-translation-nllb-multi-domain"
+  wandb_name: "50-gradient-steps-1.3B-process-reward-batch-6"
+  wandb_dir: "/root/wandb"
+  log_every_n_steps: 10
 
 reward:
   # MT reward settings (BLEU and chrF++)
