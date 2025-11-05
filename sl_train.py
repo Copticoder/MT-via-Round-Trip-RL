@@ -39,6 +39,7 @@ import math
 import os
 import random
 from pathlib import Path
+from datetime import datetime
 
 import datasets
 import evaluate
@@ -127,7 +128,7 @@ def parse_args():
     parser.add_argument(
         "--max_target_length",
         type=int,
-        default=128,
+        default=64,
         help=(
             "The maximum total sequence length for target text after "
             "tokenization. Sequences longer than this will be truncated, sequences shorter will be padded "
@@ -157,6 +158,9 @@ def parse_args():
     )
     parser.add_argument(
         "--validation_file", type=str, default=None, help="A csv or a json file containing the validation data."
+    )
+    parser.add_argument(
+        "--test_file", type=str, default=None, help="A csv or a json file containing the test data."
     )
     parser.add_argument(
         "--ignore_pad_token_for_loss",
@@ -217,13 +221,13 @@ def parse_args():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=8,
+        default=16,
         help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument(
         "--per_device_eval_batch_size",
         type=int,
-        default=32,
+        default=64,
         help="Batch size (per device) for the evaluation dataloader.",
     )
     parser.add_argument(
@@ -233,7 +237,7 @@ def parse_args():
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=10, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", type=int, default=5, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -325,12 +329,72 @@ def parse_args():
     if args.validation_file is not None:
         extension = args.validation_file.split(".")[-1]
         assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
-
+    if args.test_file is not None:
+        extension = args.test_file.split(".")[-1]
+        assert extension in ["csv", "json"], "`test_file` should be a csv or a json file."
     if args.push_to_hub:
         assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
 
     return args
 
+def postprocess_text(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [[label.strip()] for label in labels]
+
+    return preds, labels
+
+
+def sanitize_for_wandb(value: str) -> str:
+    return value.replace("/", "-").replace(" ", "_").replace(":", "-")
+
+def evaluate_model(model, tokenizer, target_lang, dataloader, args, accelerator):
+    chrf = evaluate.load("chrf")
+    model.eval()
+
+    if args.val_max_target_length is None:
+        args.val_max_target_length = args.max_target_length
+
+    samples_seen = 0
+    for step, batch in enumerate(dataloader):
+        with torch.no_grad():
+            generated_tokens = accelerator.unwrap_model(model).generate(
+                batch["input_ids"],
+                forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
+                attention_mask=batch["attention_mask"],
+            )
+
+            generated_tokens = accelerator.pad_across_processes(
+                generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+            )
+            labels = batch["labels"]
+            if not args.pad_to_max_length:
+                # If we did not pad to max length, we need to pad the labels too
+                labels = accelerator.pad_across_processes(batch["labels"], dim=1, pad_index=tokenizer.pad_token_id)
+
+            generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
+            labels = accelerator.gather(labels).cpu().numpy()
+
+            if args.ignore_pad_token_for_loss:
+                # Replace -100 in the labels as we can't decode them.
+                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+
+            decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+            decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+            decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+
+            # If we are in a multiprocess environment, the last batch has duplicates
+            if accelerator.num_processes > 1:
+                if step == len(dataloader) - 1:
+                    decoded_preds = decoded_preds[: len(dataloader.dataset) - samples_seen]
+                    decoded_labels = decoded_labels[: len(dataloader.dataset) - samples_seen]
+                else:
+                    samples_seen += len(decoded_labels)
+
+            chrf.add_batch(predictions=decoded_preds, references=decoded_labels)
+    eval_metric_chrf = chrf.compute(word_order=2, char_order=6)
+    logger.info({"chrf++": eval_metric_chrf["score"]})
+    return eval_metric_chrf
 
 def main():
     # Parse the arguments
@@ -407,6 +471,9 @@ def main():
         if args.validation_file is not None:
             data_files["validation"] = args.validation_file
             extension = args.validation_file.split(".")[-1]
+        if args.test_file is not None:
+            data_files["test"] = args.test_file
+            extension = args.test_file.split(".")[-1]
         raw_datasets = load_dataset(extension, data_files=data_files)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.
@@ -457,8 +524,6 @@ def main():
     # Get the language codes for input/target.
     source_lang = args.dataset_config_name.split("-")[0]
     target_lang = args.dataset_config_name.split("-")[1]
-    padding = "max_length" if args.pad_to_max_length else False
-
     # Temporarily set max_target_length for training.
     max_target_length = args.max_target_length
     padding = "max_length" if args.pad_to_max_length else False
@@ -493,7 +558,7 @@ def main():
 
     train_dataset = processed_datasets["train"]
     eval_dataset = processed_datasets["valid"]
-
+    test_dataset = processed_datasets["test"]
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
@@ -527,6 +592,7 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
 
+    test_dataloader = DataLoader(test_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
@@ -557,8 +623,8 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    model, optimizer, train_dataloader, eval_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader, test_dataloader, lr_scheduler
     )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -580,14 +646,28 @@ def main():
             experiment_config = vars(args)
             # TensorBoard cannot log Enums, need the raw value
             experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
-            accelerator.init_trackers("translation_no_trainer", experiment_config)
-
-    chrf = evaluate.load("chrf")
-    def postprocess_text(preds, labels):
-        preds = [pred.strip() for pred in preds]
-        labels = [[label.strip()] for label in labels]
-
-        return preds, labels
+            run_stage = "eval" if args.eval_only else "sl-train"
+            model_identifier = sanitize_for_wandb(args.model_name_or_path or config.__class__.__name__)
+            dataset_identifier = sanitize_for_wandb(args.dataset_config_name or "dataset")
+            batch_size = (
+                args.per_device_eval_batch_size if args.eval_only else args.per_device_train_batch_size
+            )
+            run_name = "-".join(
+                [
+                    run_stage,
+                    model_identifier,
+                    dataset_identifier,
+                    f"bs{batch_size}",
+                    f"lr{args.learning_rate:g}",
+                    datetime.now().strftime("%Y%m%d-%H%M%S"),
+                ]
+            )
+            logger.info(f"Initializing trackers with run name: {run_name}")
+            accelerator.init_trackers(
+                "grpo-translation-nllb-multi-domain",
+                experiment_config,
+                init_kwargs={"wandb": {"name": run_name}},
+            )
 
     # Train!
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -639,65 +719,21 @@ def main():
     # If eval_only mode, skip training and run evaluation directly
     if args.eval_only:
         logger.info("***** Running evaluation only *****")
-        model.eval()
-
-        if args.val_max_target_length is None:
-            args.val_max_target_length = args.max_target_length
-
-        samples_seen = 0
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                generated_tokens = accelerator.unwrap_model(model).generate(
-                    batch["input_ids"],
-                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                    attention_mask=batch["attention_mask"],
-                )
-
-                generated_tokens = accelerator.pad_across_processes(
-                    generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
-                )
-                labels = batch["labels"]
-                if not args.pad_to_max_length:
-                    # If we did not pad to max length, we need to pad the labels too
-                    labels = accelerator.pad_across_processes(batch["labels"], dim=1, pad_index=tokenizer.pad_token_id)
-
-                generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
-                labels = accelerator.gather(labels).cpu().numpy()
-
-                if args.ignore_pad_token_for_loss:
-                    # Replace -100 in the labels as we can't decode them.
-                    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-
-                decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-                # If we are in a multiprocess environment, the last batch has duplicates
-                if accelerator.num_processes > 1:
-                    if step == len(eval_dataloader) - 1:
-                        decoded_preds = decoded_preds[: len(eval_dataloader.dataset) - samples_seen]
-                        decoded_labels = decoded_labels[: len(eval_dataloader.dataset) - samples_seen]
-                    else:
-                        samples_seen += len(decoded_labels)
-
-                
-                chrf.add_batch(predictions=decoded_preds, references=decoded_labels)
-
-        eval_metric_chrf = chrf.compute(word_order=2, char_order=6)
-        logger.info({"chrf": eval_metric_chrf["score"]})
+        eval_metric_chrf = evaluate_model(model, tokenizer, target_lang, eval_dataloader, args, accelerator)
+        logger.info({"chrf++": eval_metric_chrf["score"]})
 
         if args.output_dir is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 os.makedirs(args.output_dir, exist_ok=True)
                 with open(os.path.join(args.output_dir, "eval_results.json"), "w") as f:
-                    json.dump({"eval_chrf": eval_metric_chrf["score"]}, f)
+                    json.dump({"eval_chrf++": eval_metric_chrf["score"]}, f)
                 logger.info(f"Evaluation results saved to {args.output_dir}/eval_results.json")
 
         accelerator.end_training()
         return
-
+    
+    
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         if args.with_tracking:
@@ -731,53 +767,7 @@ def main():
 
             if completed_steps >= args.max_train_steps:
                 break
-
-        model.eval()
-
-        if args.val_max_target_length is None:
-            args.val_max_target_length = args.max_target_length
-
-        samples_seen = 0
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                generated_tokens = accelerator.unwrap_model(model).generate(
-                    batch["input_ids"],
-                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(target_lang),
-                    attention_mask=batch["attention_mask"],
-                )
-
-                generated_tokens = accelerator.pad_across_processes(
-                    generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
-                )
-                labels = batch["labels"]
-                if not args.pad_to_max_length:
-                    # If we did not pad to max length, we need to pad the labels too
-                    labels = accelerator.pad_across_processes(batch["labels"], dim=1, pad_index=tokenizer.pad_token_id)
-
-                generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
-                labels = accelerator.gather(labels).cpu().numpy()
-
-                if args.ignore_pad_token_for_loss:
-                    # Replace -100 in the labels as we can't decode them.
-                    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-
-                decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-                # If we are in a multiprocess environment, the last batch has duplicates
-                if accelerator.num_processes > 1:
-                    if step == len(eval_dataloader) - 1:
-                        decoded_preds = decoded_preds[: len(eval_dataloader.dataset) - samples_seen]
-                        decoded_labels = decoded_labels[: len(eval_dataloader.dataset) - samples_seen]
-                    else:
-                        samples_seen += len(decoded_labels)
-
-                chrf.add_batch(predictions=decoded_preds, references=decoded_labels)
-        eval_metric_chrf = chrf.compute(word_order=2, char_order=6)
-        logger.info({"chrf++": eval_metric_chrf["score"]})
-
+        eval_metric_chrf = evaluate_model(model, tokenizer, target_lang, eval_dataloader, args, accelerator)
         if args.with_tracking:
             accelerator.log(
                 {
@@ -788,7 +778,6 @@ def main():
                 },
                 step=completed_steps,
             )
-
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
@@ -810,7 +799,12 @@ def main():
             if args.output_dir is not None:
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
-
+    test_metric_chrf = evaluate_model(model, tokenizer, target_lang, test_dataloader, args, accelerator)
+    print(f"Test CHRF++: {test_metric_chrf['score']}")
+    # log to wandb if available
+    if args.with_tracking:
+        # log the test chrf++ score as a scalar
+        accelerator.log({"test/chrf++": test_metric_chrf["score"]})
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
