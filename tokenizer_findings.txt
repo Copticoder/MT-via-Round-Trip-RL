@@ -1,0 +1,46 @@
+================================================================================
+Example 1: Walikipuniw jutawa! Jutir urutak utjtamti?
+NLLB produced 14 tokens | Goldfish produced 9 tokens
+pos | NLLB token             |       id | span               || Goldfish token         |       id | span              
+----------------------------------------------------------------------------------------------------------------------
+  0 | ▁Wali                  |    37950 | Wali               || ▁Wali                  |      658 | Wali              
+  1 | kip                    |    64887 | kip                || kipuniw                |    17322 | kipuniw           
+  2 | uniw                   |    54861 | uniw               || ▁ju                    |       35 |  ju               
+  3 | ▁ju                    |     1185 |  ju                || tawa                   |      659 | tawa              
+  4 | tawa                   |    18771 | tawa               || !                      |       71 | !                 
+  5 | !                      |   248203 | !                  || ▁Jutir                 |    12371 |  Jutir            
+  6 | ▁Jut                   |   125763 |  Jut               || ▁urutak                |    35348 |  urutak           
+  7 | ir                     |       52 | ir                 || ▁utjtamti              |    35918 |  utjtamti         
+  8 | ▁urut                  |   118461 |  urut              || ?                      |       27 | ?                 
+  9 | ak                     |       31 | ak                 ||                        |        - |                   
+ 10 | ▁ut                    |     1337 |  ut                ||                        |        - |                   
+ 11 | jt                     |     5718 | jt                 ||                        |        - |                   
+ 12 | amti                   |    48314 | amti               ||                        |        - |                   
+ 13 | ?                      |   248130 | ?                  ||                        |        - |                   
+
+================================================================================
+Example 2: Nayax suma qamaña munata.
+NLLB produced 8 tokens | Goldfish produced 5 tokens
+pos | NLLB token             |       id | span               || Goldfish token         |       id | span              
+----------------------------------------------------------------------------------------------------------------------
+  0 | ▁Nayax                 |   113358 | Nayax              || ▁Nayax                 |     1100 | Nayax             
+  1 | ▁suma                  |    11625 |  suma              || ▁suma                  |       66 |  suma             
+  2 | ▁q                     |      135 |  q                 || ▁qamaña                |     6030 |  qamaña           
+  3 | ama                    |      292 | ama                || ▁munata                |     3956 |  munata           
+  4 | ña                     |     3918 | ña                 || .                      |        4 | .                 
+  5 | ▁mun                   |     1194 |  mun               ||                        |        - |                   
+  6 | ata                    |      258 | ata                ||                        |        - |                   
+  7 | .                      |   248075 | .                  ||                        |        - |                   
+
+================================================================================
+Example 3: Jichhax kunsa lurapxañani?
+NLLB produced 7 tokens | Goldfish produced 5 tokens
+pos | NLLB token             |       id | span               || Goldfish token         |       id | span              
+----------------------------------------------------------------------------------------------------------------------
+  0 | ▁Jich                  |    64862 | Jich               || ▁Jichhax               |     2098 | Jichhax           
+  1 | hax                    |    67888 | hax                || ▁kunsa                 |      851 |  kunsa            
+  2 | ▁kunsa                 |   128792 |  kunsa             || ▁lur                   |      342 |  lur              
+  3 | ▁lurap                 |   115773 |  lurap             || apxañani               |     7809 | apxañani          
+  4 | xañ                    |    80131 | xañ                || ?                      |       27 | ?                 
+  5 | ani                    |      270 | ani                ||                        |        - |                   
+  6 | ?                      |   248130 | ?                  ||                        |        - |   
