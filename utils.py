@@ -3,6 +3,7 @@ from typing import Sequence
 
 import torch
 from sacrebleu.metrics import CHRF
+from gf import score_text as gf_score_text
 
 # =========================
 # Distributed GRPO Utilities
@@ -98,6 +99,10 @@ def grpo_compute_loss_and_logs(
     beta: float,
     clip_param: float,
     tgt_lang_id: int,
+    goldfish_model=None,
+    goldfish_tokenizer=None,
+    goldfish_max_seq_len: int = 64,
+    goldfish_reward_weight: float = 0.5,
 ):
     if isinstance(ground_truths, str):
         ground_truths = [ground_truths]
@@ -111,6 +116,12 @@ def grpo_compute_loss_and_logs(
         )
 
     device = next(model.parameters()).device
+    ref_device = next(ref_model.parameters()).device if ref_model is not None else device
+    gold_device = (
+        next(goldfish_model.parameters()).device
+        if goldfish_model is not None
+        else device
+    )
     batch_size, num_candidates, seq_len = generated_sequences.size()
     if batch_size != len(ground_truths):
         raise ValueError(
@@ -127,9 +138,13 @@ def grpo_compute_loss_and_logs(
         model, tokenizer, encoder_inputs, decoder_input_ids, target_ids
     )
     with torch.no_grad():
+        # Move inputs to reference model device for computation
+        enc_ref = {k: v.to(ref_device, non_blocking=True) for k, v in encoder_inputs.items()}
+        dec_in_ref = decoder_input_ids.to(ref_device, non_blocking=True)
+        tgt_ref = target_ids.to(ref_device, non_blocking=True)
         ref_per_token_logps = grpo_compute_decoder_per_token_logps(
-            ref_model, tokenizer, encoder_inputs, decoder_input_ids, target_ids
-        )
+            ref_model, tokenizer, enc_ref, dec_in_ref, tgt_ref
+        ).to(device, non_blocking=True)
 
     # Completion mask to ignore pads and tokens after first EOS
     is_pad = target_ids == tokenizer.pad_token_id
@@ -141,40 +156,59 @@ def grpo_compute_loss_and_logs(
     completion_mask = completion_mask.reshape(batch_size, num_candidates, -1)
 
     # Decode generated sequences without special tokens for reward computation
-    generated_texts = tokenizer.batch_decode(
-        torch.where(
-            generated_sequences.reshape(-1, generated_sequences.size(-1)) == tokenizer.pad_token_id,
-            end_of_sentence_token_id,
-            generated_sequences.reshape(-1, generated_sequences.size(-1)),
-        ),
-        skip_special_tokens=True,
-    )
+    flat_gen = generated_sequences.reshape(-1, generated_sequences.size(-1))
+    generated_texts = tokenizer.batch_decode(flat_gen, skip_special_tokens=True)
     references = [
         ground_truths[idx // num_candidates]
         for idx in range(len(generated_texts))
     ]
 
-    # Compute chrF with evaluate (character order=6) for rewards
+    # Reward via goldfish prefix probability and chrF prefix scores
+    goldfish_rewards = []
+    chrf_prefix_rewards = []
     chrf_metric = CHRF(word_order=2, char_order=6)
-    # evaluate returns an average score; we also approximate per-sample by recomputing individually
-    rewards = []
-    # we compute the chrf++ scores for each prefix of the hypothesis
-    longest_hyp_length = target_ids.size(-1)
-    chrf_mean = 0.0
+    chrf_vals = []
+    @torch.no_grad()
+    def goldfish_prefix_prob(prefix_text: str, target_text: str) -> float:
+        if goldfish_model is None or goldfish_tokenizer is None:
+            return 0.0
+        # Use gf.score_text: returns summed log-prob of target given input
+        # We use empty input_text to score unconditional probability of the prefix
+        logp = gf_score_text(goldfish_model, goldfish_tokenizer, prefix_text, target_text)
+        return torch.tensor(logp)
+
+    # Build rewards aligned to decoder target length
+    target_len = target_ids.size(-1)
     for hyp, ref in zip(generated_texts, references):
-        # loop over the tokens in the hypothesis
-        splitted_hyp = tokenizer.tokenize(hyp)
-        prefix_chrf_scores = torch.zeros((longest_hyp_length,), device=device)
-        for prefix_len in range(1, longest_hyp_length+1):
-            prefix_hyp = tokenizer.convert_tokens_to_string(splitted_hyp[:prefix_len])
-            prefix_chrf_scores[prefix_len-1] = chrf_metric.corpus_score(hypotheses=[prefix_hyp], references=[[ref]]).score / 100.0
-        chrf_mean += prefix_chrf_scores[-1].item()
-        rewards.append(prefix_chrf_scores)
-    # rewards is now a list of tensors, each of shape (num_prefixes, ). we need to reshape back to (B, N, num_prefixes). For example, if it was of length 30, we need to shape back 
-    # the mean of the chrf++ scores should be the mean when the whole hypothesis is considered
-    rewards = torch.stack(rewards, dim=0)
-    chrf_mean = torch.tensor(chrf_mean / (batch_size * num_candidates), device=device)
-    rewards = rewards.reshape(batch_size, num_candidates, -1)
+        # For logging: final CHRF once per sample
+        chrf_vals.append(chrf_metric.corpus_score(hypotheses=[hyp], references=[[ref]]).score / 100.0)
+        # Tokenize hyp with NLLB tokenizer to define NLLB-prefix boundaries
+        nllb_tokens = tokenizer.tokenize(hyp)
+        # Build rewards length equal to target_len, using best-effort prefixes
+        g_prefix_rewards = torch.zeros((target_len,), device=device)
+        c_prefix_rewards = torch.zeros((target_len,), device=device)
+        for t in range(1, target_len + 1):
+            if t <= len(nllb_tokens):
+                prefix_text = tokenizer.convert_tokens_to_string(nllb_tokens[:t])
+                target_text = tokenizer.convert_tokens_to_string(nllb_tokens[t:t+1])
+                if target_text == "":
+                    continue
+                # Goldfish prefix probability
+                g_prefix_rewards[t - 1] = goldfish_prefix_prob(prefix_text, target_text)
+                # chrF++ prefix score (0..1)
+                c_prefix_rewards[t - 1] = chrf_metric.corpus_score(hypotheses=[prefix_text], references=[[ref]]).score / 100.0
+            else:
+                # If beyond actual tokens, repeat last value
+                g_prefix_rewards[t - 1] = g_prefix_rewards[t - 2] if t > 1 else 0.0
+                c_prefix_rewards[t - 1] = c_prefix_rewards[t - 2] if t > 1 else 0.0
+        goldfish_rewards.append(g_prefix_rewards)
+        chrf_prefix_rewards.append(c_prefix_rewards)
+
+    goldfish_rewards = torch.stack(goldfish_rewards, dim=0).reshape(batch_size, num_candidates, -1)
+    chrf_prefix_rewards = torch.stack(chrf_prefix_rewards, dim=0).reshape(batch_size, num_candidates, -1)
+    # Combine rewards (weighting goldfish prob and chrF prefix)
+    rewards = goldfish_reward_weight * goldfish_rewards + (1.0 - goldfish_reward_weight) * chrf_prefix_rewards
+    chrf_mean = torch.tensor(sum(chrf_vals) / max(len(chrf_vals), 1), device=device)
     standardized_rewards = (rewards - rewards.mean(dim=1, keepdim=True)) / (rewards.std(dim=1, keepdim=True) + 1e-4)
     # in process reward based grpo, the process supervision calculates the advantage of each token as the sum of the normalized rewards from the following steps, i.e., ˆ𝐴𝑖,𝑡 = 𝑖𝑛𝑑𝑒𝑥(𝑗)≥𝑡 𝑟𝑖𝑛𝑑𝑒𝑥(𝑗)
     advantages = torch.zeros_like(rewards)

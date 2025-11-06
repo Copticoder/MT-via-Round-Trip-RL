@@ -10,6 +10,8 @@ from tqdm.auto import tqdm
 from transformers import (
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
+    AutoConfig,
+    AutoModelForCausalLM,
 )
 from lora_utils import apply_lora
 from utils import (
@@ -130,11 +132,26 @@ def _run_evaluation(
 @hydra.main(version_base=None, config_path="./configs/", config_name="train")
 def train(config: DictConfig):
     torch.manual_seed(config.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Device mapping: policy (NLLB) on cuda:1, reference+goldfish on cuda:0
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        aux_device = torch.device("cuda:0")
+        policy_device = torch.device("cuda:1")
+    else:
+        # Fallback to single GPU/CPU
+        aux_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        policy_device = aux_device
     # Build model and tokenizer
     model, tokenizer = get_model(config)
-    model.to(device)
-
+    model.to(policy_device)
+    # Perplexity model for rewarding the generated sequences
+    perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_full")
+    perplexity_model = AutoModelForCausalLM.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_full", config=perplexity_config
+    )
+    perplexity_tokenizer = AutoTokenizer.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_full"
+    )
+    perplexity_model.to(aux_device)
     eval_cfg = getattr(config.task, "eval", None)
     eval_only = bool(getattr(eval_cfg, "only", False)) if eval_cfg is not None else False
     run_eval = bool(getattr(eval_cfg, "run", False)) if eval_cfg is not None else False
@@ -142,13 +159,14 @@ def train(config: DictConfig):
         run_eval = True
     run_training = not eval_only
 
+    if getattr(config.task.training, "use_wandb", True):
+        wandb.init(
+            project="grpo-translation-nllb-multi-domain",
+            name="50-gradient-steps-1.3B-process-reward-batch-6",
+            config=OmegaConf.to_container(config, resolve=True),
+            dir="/root/wandb",
+        )
     # Initialize Weights & Biases
-    wandb.init(
-        project="grpo-translation-nllb-multi-domain",
-        name="50-gradient-steps-1.3B-process-reward-batch-6",
-        config=OmegaConf.to_container(config, resolve=True),
-        dir="/root/wandb",
-    )
     train_table = None
     if run_training:
         train_table = wandb.Table(columns=["reference", "generated", "sample_id"], log_mode="MUTABLE")
@@ -161,9 +179,9 @@ def train(config: DictConfig):
                 reference_name,
                 attn_implementation="flash_attention_2",
                 dtype=model.dtype,
-            ).to(device)
+            ).to(aux_device)
         else:
-            ref_model = copy.deepcopy(model).to(device)
+            ref_model = copy.deepcopy(model).to(aux_device)
         ref_model.eval()
         for p in ref_model.parameters():
             p.requires_grad_(False)
@@ -223,11 +241,11 @@ def train(config: DictConfig):
                             data,
                             eval_cfg,
                             tgt_lang_id=tgt_lang_id,
-                            device=device,
+                device=policy_device,
                             max_new_tokens=max_new_tokens,
                         )
                 src_prompt, ground_truths, sample_ids = batch
-                encoder_inputs = {k: v.to(device, non_blocking=True) for k, v in src_prompt.items()}
+                encoder_inputs = {k: v.to(policy_device, non_blocking=True) for k, v in src_prompt.items()}
                 batch_size = encoder_inputs["input_ids"].size(0)
 
                 for _ in range(updates_per_batch):
@@ -266,6 +284,8 @@ def train(config: DictConfig):
                         beta=beta,
                         clip_param=clip_param,
                         tgt_lang_id=tgt_lang_id,
+                        goldfish_model=perplexity_model,
+                        goldfish_tokenizer=perplexity_tokenizer,
                     )
 
                     optimizer.zero_grad()
@@ -313,17 +333,17 @@ def train(config: DictConfig):
                         ref_text, gen_text, ref_sample_id = best_candidates[0]
                         print(f"Reference[{ref_sample_id}]: {ref_text}")
                         print(f"Generated[{ref_sample_id}]: {gen_text}")
-
-                        # Log to Weights & Biases
-                        wandb.log(
-                            {
-                                "train/loss": float(logs["loss"].item()),
-                                "train/kl": float(logs["kl"].item()),
-                                "train/chrf": float(logs["chrf"].item()),
-                                "train/gradient_norm_preclip": float(grad_norm_preclip),
-                                "train/gradient_norm": float(grad_norm),
-                            }
-                        )
+                        if wandb.run is not None:
+                            # Log to Weights & Biases
+                            wandb.log(
+                                {
+                                    "train/loss": float(logs["loss"].item()),
+                                    "train/kl": float(logs["kl"].item()),
+                                    "train/chrf": float(logs["chrf"].item()),
+                                    "train/gradient_norm_preclip": float(grad_norm_preclip),
+                                    "train/gradient_norm": float(grad_norm),
+                                }
+                            )
                     step_idx += 1
                     
                         # if train_table is not None:
@@ -338,7 +358,7 @@ def train(config: DictConfig):
                     # Optional periodic evaluation every N updates
 
             # Refresh reference model at epoch boundaries
-            ref_model = copy.deepcopy(model).to(device)
+            ref_model = copy.deepcopy(model).to(aux_device)
             ref_model.eval()
             for p in ref_model.parameters():
                 p.requires_grad_(False)
@@ -350,7 +370,7 @@ def train(config: DictConfig):
             data,
             eval_cfg,
             tgt_lang_id=tgt_lang_id,
-            device=device,
+            device=policy_device,
             max_new_tokens=max_new_tokens,
         )
 
