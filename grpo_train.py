@@ -31,6 +31,7 @@ def _run_evaluation(
     device: torch.device,
     max_new_tokens: int,
     split_name: str = "eval",
+    step_idx: int = 0,
 ):
     if eval_cfg is None or dataloader is None:
         return {}
@@ -119,9 +120,12 @@ def _run_evaluation(
     if wandb.run is not None and (results or sample_records):
         log_payload = results.copy()
         # if sample_records:
-        #     eval_table = wandb.Table(columns=["reference", "generated", "sample_id"], log_mode="MUTABLE")
+            
+        #     eval_table = wandb.Table(columns=["reference", "generated", "sample_id", "step"], log_mode="MUTABLE")
+        #     # pick the same 50 samples for the eval table and set which step they are from
+        #     sample_records = sample_records[:50]
         #     for reference, hypothesis, sample_id in sample_records:
-        #         eval_table.add_data(reference, hypothesis, sample_id)
+        #         eval_table.add_data(reference, hypothesis, sample_id, step_idx)
         #     log_payload["eval/Translations"] = eval_table
         wandb.log(log_payload)
 
@@ -129,7 +133,6 @@ def _run_evaluation(
         model.train()
 
     return results
-
 
 @hydra.main(version_base=None, config_path="./configs/", config_name="train")
 def train(config: DictConfig):
@@ -146,14 +149,14 @@ def train(config: DictConfig):
     model, tokenizer = get_model(config)
     model.to(policy_device)
     # Perplexity model for rewarding the generated sequences
-    # perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_full")
-    # perplexity_model = AutoModelForCausalLM.from_pretrained(
-    #     f"goldfish-models/{config.task.data.target_lang}_full", config=perplexity_config
-    # )
-    # perplexity_tokenizer = AutoTokenizer.from_pretrained(
-    #     f"goldfish-models/{config.task.data.target_lang}_full"
-    # )
-    # perplexity_model.to(aux_device)
+    perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_1000mb")
+    perplexity_model = AutoModelForCausalLM.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_1000mb", config=perplexity_config
+    )
+    perplexity_tokenizer = AutoTokenizer.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_1000mb"
+    )
+    perplexity_model.to(aux_device)
     source_lang_code = config.task.data.source_lang
     target_lang_code = config.task.data.target_lang
     if hasattr(tokenizer, "src_lang"):
@@ -326,7 +329,27 @@ def train(config: DictConfig):
                             "Unable to reshape generated sequences into (batch_size, num_return_sequences, seq_len). "
                             f"Batch size={batch_size}, num_return_sequences={num_return_sequences}, seq_len={seq_len}."
                         ) from exc
+                     # Compute GRPO loss and update model
+                    loss_forward, logs_forward = grpo_compute_loss_and_logs(
+                        model,
+                        ref_model,
+                        tokenizer,
+                        encoder_inputs,
+                        generated_all,
+                        ground_truths,
+                        end_of_sentence_token_id=tokenizer.eos_token_id,
+                        beta=beta,
+                        clip_param=clip_param,
+                        tgt_lang_id=tgt_lang_id,
+                        length_penalty_weight=float(getattr(config.task.reward, "length_penalty_weight", 0.0)),
+                        goldfish_model=perplexity_model,
+                        goldfish_tokenizer=perplexity_tokenizer,
+                        goldfish_reward_weight=float(getattr(config.task.reward, "goldfish_reward_weight", 0.5)),
+                    )
                     
+                    loss_scale = 1.0 / float(grad_accum_steps)
+                    loss_forward = loss_forward * loss_scale
+                    loss_forward.backward()
                     # Prepare backward direction prompts from generated target sentences
                     forward_generated_flat = generated_all.reshape(
                         batch_size * num_return_sequences, seq_len
@@ -384,7 +407,7 @@ def train(config: DictConfig):
                         beta=beta,
                         clip_param=clip_param,
                         tgt_lang_id=src_lang_id,
-                        length_penalty_weight=float(getattr(config.task.reward, "length_penalty_weight", 0.0)),
+                        # length_penalty_weight=float(getattr(config.task.reward, "length_penalty_weight", 0.0)),
                         # goldfish_model=perplexity_model,
                         # goldfish_tokenizer=perplexity_tokenizer,
                         # goldfish_reward_weight=float(getattr(config.task.reward, "goldfish_reward_weight", 0.5)),
@@ -422,7 +445,8 @@ def train(config: DictConfig):
 
                 print(
                     f"[epoch {epoch}] step {step_idx} (opt {optimizer_step}) | "
-                    f"b_loss={logs_backward['loss'].item():.4f} b_kl={logs_backward['kl'].item():.4f} b_reward={logs_backward['reward'].item():.4f} b_chrf={logs_backward['chrf'].item():.4f} b_bleu={logs_backward['bleu'].item():.4f}"
+                    f"f_loss={logs_forward['loss'].item():.4f} f_kl={logs_forward['kl'].item():.4f} f_reward={logs_forward['reward'].item():.4f} f_chrf={logs_forward['chrf'].item():.4f} | ppl={logs_forward['ppl'].item():.4f} | "
+                    f"b_loss={logs_backward['loss'].item():.4f} b_kl={logs_backward['kl'].item():.4f} b_reward={logs_backward['reward'].item():.4f} b_chrf={logs_backward['chrf'].item():.4f} b_bleu={logs_backward['bleu'].item():.4f} b_ppl={logs_backward['ppl'].item():.4f}"
                 )
                 # Print the reference and one generated sequence for inspection
                 best_candidates = []
@@ -450,14 +474,6 @@ def train(config: DictConfig):
                             "train/backward_bleu": float(logs_backward["bleu"].item()),
                         }
                     )
-                    # if train_table is not None:
-                    #     for reference, decoded, ref_sample_id in best_candidates:
-                    #         train_table.add_data(
-                    #             reference,
-                    #             decoded,
-                    #             ref_sample_id,
-                    #         )
-                    #     wandb.log({"train/Translations": train_table}, step=step_idx)
                 step_idx += 1
             if accum_steps_since_update > 0:
                 optimizer.step()

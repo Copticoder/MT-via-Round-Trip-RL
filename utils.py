@@ -211,18 +211,48 @@ def grpo_compute_loss_and_logs(
 
     # Compute chrF with evaluate (character order=6) for outcome rewards
     chrf_metric = CHRF(word_order=2, char_order=6)
-    bleu_metric = BLEU(effective_order=True)
     chrf_scores = []
     bleu_scores = []
+    ppl_scores = []
+    compute_bleu = False
+    compute_ppl = False
+    # If tgt_lang_id is defined as English, use BLEU, otherwise skip BLEU.
+    # if the target language is not English, score the log-probability of the target text given the input text.
+    if tgt_lang_id == 256047:
+        compute_bleu = True
+    else:
+        compute_ppl = True
+
+    if compute_bleu:
+        bleu_metric = BLEU(effective_order=True)
+
     for hyp, ref in zip(generated_texts, references):
-        chrf_scores.append(chrf_metric.corpus_score(hypotheses=[hyp], references=[[ref]]).score / 100.0)
-        bleu_scores.append(bleu_metric.corpus_score(hypotheses=[hyp], references=[[ref]]).score / 100.0)
+        chrf_score = chrf_metric.corpus_score(hypotheses=[hyp], references=[[ref]]).score / 100.0
+        chrf_scores.append(chrf_score)
+        if compute_bleu:
+            bleu_score = bleu_metric.corpus_score(hypotheses=[hyp], references=[[ref]]).score / 100.0
+            bleu_scores.append(bleu_score)
+        if compute_ppl:
+            input_text = " ".join(hyp.split(" ")[:-1])
+            target_text = hyp.split(" ")[-1]
+            log_prob = score_text(goldfish_model, goldfish_tokenizer, input_text, target_text)
+            # divide by 100 as hypothetical maximum
+            log_prob = log_prob / 100.0
+            log_prob = log_prob * goldfish_reward_weight
+            ppl_scores.append(log_prob)
     chrf_scores_tensor = torch.tensor(chrf_scores, device=device)
-    bleu_scores_tensor = torch.tensor(bleu_scores, device=device)
     chrf_mean = chrf_scores_tensor.mean()
-    bleu_mean = bleu_scores_tensor.mean()
-    # Combine chrF and BLEU equally for rewards
-    combined_scores_tensor = 0.5 * chrf_scores_tensor + 0.5 * bleu_scores_tensor
+    if compute_bleu and bleu_scores:  # Calculate BLEU mean and combine
+        ppl_mean = torch.tensor(0.0, device=device)
+        bleu_scores_tensor = torch.tensor(bleu_scores, device=device)
+        bleu_mean = bleu_scores_tensor.mean()
+        combined_scores_tensor = 0.5 * chrf_scores_tensor + 0.5 * bleu_scores_tensor
+    else:
+        ppl_scores_tensor = torch.tensor(ppl_scores, device=device)
+        ppl_mean = ppl_scores_tensor.mean()
+        bleu_mean = torch.tensor(0.0, device=device)
+        combined_scores_tensor = 0.5 * chrf_scores_tensor + 0.5 * ppl_scores_tensor
+
     rewards = combined_scores_tensor.reshape(batch_size, num_candidates)
     standardized_rewards = (rewards - rewards.mean(dim=1, keepdim=True)) / (
         rewards.std(dim=1, keepdim=True) + 1e-4
@@ -258,6 +288,7 @@ def grpo_compute_loss_and_logs(
         "kl": kl_mean.detach(),
         "reward": rewards.mean().detach(),
         "chrf": chrf_mean.detach(),
+        "ppl": ppl_mean.detach(),
         "bleu": bleu_mean.detach(),
     }
     return loss, logs
