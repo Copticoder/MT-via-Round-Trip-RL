@@ -38,10 +38,10 @@
 
         },
         {
-            "name": "Debug: SL",
+            "name": "Debug: file",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/sl.py",
+            "program": "${workspaceFolder}/test.py",
             "console": "integratedTerminal",
             "justMyCode": false
         }

@@ -19,6 +19,7 @@ from utils import (
     grpo_compute_loss_and_logs,
 )
 from dl import TranslationDataModule
+from vllm import LLM, SamplingParams
 
 
 def _run_evaluation(
