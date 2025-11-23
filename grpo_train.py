@@ -21,14 +21,26 @@ from utils import (
 from dl import TranslationDataModule
 from vllm import LLM, SamplingParams
 
+def extract_predicted_from_generated(generated, tokenizer, length_before_generation, sample_idx):
+    output_ids = generated[length_before_generation:].tolist()
+    if not output_ids:
+        return ""
 
+    # parsing thinking content
+    try:
+        # rindex finding 151668 (</think>)
+        index = len(output_ids) - output_ids[::-1].index(151668)
+    except ValueError:
+        index = 0
+
+    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+    return content
 def _run_evaluation(
     model: torch.nn.Module,
     tokenizer,
     dataloader,
     eval_cfg,
     *,
-    tgt_lang_id: int,
     device: torch.device,
     max_new_tokens: int,
     split_name: str = "eval",
@@ -58,25 +70,10 @@ def _run_evaluation(
         # Fallback if len(val_loader) is not available
         total_batches = None
 
-    num_beams = int(getattr(eval_cfg, "num_beams", 1))
-    generation_kwargs = dict(
-        max_new_tokens=max_new_tokens,
-        num_beams=num_beams,
-        do_sample=False,
-        forced_bos_token_id=tgt_lang_id,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-    if num_beams > 1:
-        generation_kwargs["early_stopping"] = True
-
     with torch.no_grad():
         with tqdm(total=total_batches, desc=f"Evaluating ({metric_prefix})", leave=False) as pbar:
             for idx, batch in enumerate(loader):
-                if len(batch) == 4:
-                    encoder_inputs, ground_truths, _, sample_ids = batch
-                else:
-                    encoder_inputs, ground_truths, sample_ids = batch
+                encoder_inputs, ground_truths, sample_ids = batch
                 if isinstance(ground_truths, str):
                     ground_truths = [ground_truths]
                 else:
@@ -85,13 +82,15 @@ def _run_evaluation(
                 encoder_inputs = {k: v.to(device, non_blocking=True) for k, v in encoder_inputs.items()}
                 generated = model.generate(
                     input_ids=encoder_inputs["input_ids"],
-                    attention_mask=encoder_inputs.get("attention_mask"),
-                    **generation_kwargs,
+                    attention_mask=encoder_inputs["attention_mask"],
+                    max_new_tokens=max_new_tokens,
                 )
                 if generated.dim() == 1:
                     generated = generated.unsqueeze(0)
                 for sample_idx, reference in enumerate(ground_truths):
-                    hypothesis = tokenizer.decode(generated[sample_idx], skip_special_tokens=True)
+                    # get the length of the input ids for this example before generation 
+                    length_before_generation = encoder_inputs["input_ids"][sample_idx].size(0)
+                    hypothesis = extract_predicted_from_generated(generated[sample_idx], tokenizer, length_before_generation, sample_idx)
                     ref_text = reference if isinstance(reference, str) else str(reference)
                     predictions.append(hypothesis)
                     references.append(ref_text)
@@ -150,12 +149,15 @@ def train(config: DictConfig):
     model, tokenizer = get_model(config)
     model.to(policy_device)
     # Perplexity model for rewarding the generated sequences
-    perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_1000mb")
+    added_for_rus = "_1000mb"
+    if config.task.data.target_lang in ["ayr_Latn", "bho_Deva", "dyu_Latn", "fur_Latn", "wol_Latn"]:
+        added_for_rus = "_full"
+    perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}{added_for_rus}")
     perplexity_model = AutoModelForCausalLM.from_pretrained(
-        f"goldfish-models/{config.task.data.target_lang}_1000mb", config=perplexity_config
+        f"goldfish-models/{config.task.data.target_lang}{added_for_rus}", config=perplexity_config
     )
     perplexity_tokenizer = AutoTokenizer.from_pretrained(
-        f"goldfish-models/{config.task.data.target_lang}_1000mb"
+        f"goldfish-models/{config.task.data.target_lang}{added_for_rus}"
     )
     perplexity_model.to(aux_device)
     source_lang_code = config.task.data.source_lang
@@ -291,7 +293,6 @@ def train(config: DictConfig):
             tokenizer,
             val_dataloader,
             eval_cfg,
-            tgt_lang_id=tgt_lang_id,
             device=policy_device,
             max_new_tokens=max_new_tokens,
             split_name="eval",
@@ -303,7 +304,7 @@ def train(config: DictConfig):
             step_idx = 0
 
             for batch in train_loader:
-                src_prompt, ground_truths, source_texts, sample_ids = batch
+                src_prompt, ground_truths, sample_ids = batch
                 encoder_inputs = {k: v.to(policy_device, non_blocking=True) for k, v in src_prompt.items()}
                 batch_size = encoder_inputs["input_ids"].size(0)                
                 while optimizer_step < updates_per_batch:
@@ -533,10 +534,10 @@ def train(config: DictConfig):
 def get_model(config: DictConfig):
     model_cfg = config.task.model
     tokenizer = AutoTokenizer.from_pretrained(
-        model_cfg.name,
+        model_cfg.name, padding_side="left"
     )
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        model_cfg.name
+    model = AutoModelForCausalLM.from_pretrained(
+        model_cfg.name, dtype=torch.float16
     )
 
     use_lora = bool(getattr(model_cfg, "use_lora", False))

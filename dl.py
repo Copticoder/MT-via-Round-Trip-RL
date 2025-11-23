@@ -7,7 +7,14 @@ from datasets import load_dataset
 
 warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
-
+language_mapping = {
+    "ayr_Latn": "Central Aymara",
+    "bho_Deva": "Bhojpuri",
+    "dyu_Latn": "Dyula",
+    "fur_Latn": "Friulian",
+    "rus_Cyrl": "Russian",
+    "wol_Latn": "Wolof",
+}
 class TranslationDataModule(LightningDataModule):
     def __init__(
         self,
@@ -29,7 +36,6 @@ class TranslationDataModule(LightningDataModule):
         self.test_data = None
         self._train_sampler = None
         self._train_batch_size = max(int(train_batch_size), 1)
-
     def setup(self, stage=None):
         prompts = load_dataset(
             self.hparams.data_path, self.hparams.dataset_config_name, trust_remote_code=True
@@ -108,14 +114,28 @@ class TranslationDataModule(LightningDataModule):
         )
 
     def _collate_batch(self, batch):
-        encoder_texts, targets, sources, sample_ids = zip(*batch)
+        few_shot_prompt = """
+        Your task is to translate between English and {language}. Here are some examples:\n\nExample 1:\n\nEnglish: We got up a five a.m. and took a 3 mile jaunt all around our neighborhood. It was great exercise and a great way to start the day! How did your day start today?\n{language}: Phisqha alwa pachaw sartapxta ukatx utaj jak’an 3 millas ukaruw muytir sarapxta. Jichhürux kusapuniw ukham muytir sarañaxa! Jumatakist kunjamakis jichhüruxa?\n\nExample 2:\n\nEnglish: It would be awesome to go to one of your shows! Do you have anything coming up?\n{language}: Walikipuniw jutawa! Jutir urutak utjtamti?\n\nNow your turn. Translate the following English sentence into {language}:\n\nEnglish: {source_text}\n{language}: """
+        encoder_texts, targets, sample_ids = zip(*batch)
+        inputs = []
+        for encoder_text in encoder_texts:
+            messages = [
+                {"role": "user", "content": few_shot_prompt.format(source_text=encoder_text, language=language_mapping[self.hparams.target_lang])}
+            ]
+            text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False
+)
+            inputs.append(text)
+        
         batch_encoding = self.tokenizer(
-            list(encoder_texts),
-            padding=True,
-            truncation=True,
+            list(inputs),
             return_tensors="pt",
+            padding=True,
         )
-        return batch_encoding, list(targets), list(sources), list(sample_ids)
+        return batch_encoding, list(targets), list(sample_ids)
 
 
 class TranslationDataPipe(MapDataPipe):
@@ -132,4 +152,4 @@ class TranslationDataPipe(MapDataPipe):
     def __getitem__(self, index):
         src_text = self.prompts[index][self.src_col]
         tgt_text = self.prompts[index][self.tgt_col]
-        return src_text, tgt_text, src_text, index
+        return src_text, tgt_text, index

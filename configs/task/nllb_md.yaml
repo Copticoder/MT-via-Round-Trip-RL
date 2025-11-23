@@ -3,14 +3,11 @@ name: "nllb-multi-domain"
 data:
   path: "breakend/nllb-multi-domain"
   source_lang: eng_Latn
-  target_lang: rus_Cyrl
-  dataset_config_name: "eng_Latn-rus_Cyrl"
+  target_lang: ayr_Latn
+  dataset_config_name: "eng_Latn-ayr_Latn"
 
 model:
-  # name: "facebook/nllb-200-distilled-1.3B"
-  name: "facebook/nllb-200-distilled-600M"
-  # name: "model/"
-  # name: "facebook/nllb-200-3.3B"
+  name: "Qwen/Qwen3-0.6B"
   use_lora: false
   lora:
     r: 8
@@ -30,12 +27,11 @@ training:
   gen_temperature: 1.8
   beta: 0.04
   clip_param: 0.2
-  top_k: 100
+  top_k: 20
   top_p: 0.95
-  use_wandb: true
+  use_wandb: false
   log_every_n_steps: 5
   update_ref_policy_every_n_steps: 16
-  
 eval:
   run: true
   only: false
