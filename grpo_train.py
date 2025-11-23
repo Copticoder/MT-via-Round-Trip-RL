@@ -84,13 +84,18 @@ def _run_evaluation(
                     input_ids=encoder_inputs["input_ids"],
                     attention_mask=encoder_inputs["attention_mask"],
                     max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    num_return_sequences=1,
+                    top_k=20,
+                    top_p=0.8,
                 )
                 if generated.dim() == 1:
                     generated = generated.unsqueeze(0)
                 for sample_idx, reference in enumerate(ground_truths):
                     # get the length of the input ids for this example before generation 
                     length_before_generation = encoder_inputs["input_ids"][sample_idx].size(0)
-                    hypothesis = extract_predicted_from_generated(generated[sample_idx], tokenizer, length_before_generation, sample_idx)
+                    hypothesis = extract_predicted_from_generated(generated[sample_idx], tokenizer, length_before_generation)
                     ref_text = reference if isinstance(reference, str) else str(reference)
                     predictions.append(hypothesis)
                     references.append(ref_text)
@@ -371,7 +376,6 @@ def train(config: DictConfig):
                         tokenizer,
                         val_dataloader,
                         eval_cfg,
-                        tgt_lang_id=tgt_lang_id,
                         device=policy_device,
                         max_new_tokens=max_new_tokens,
                         split_name="eval",
@@ -390,7 +394,7 @@ def train(config: DictConfig):
                     best_candidates.append((reference, decoded, sample_ids[idx]))
                 ref_text, gen_text, ref_sample_id = best_candidates[0]
                 print(f"Reference[{ref_sample_id}]: {ref_text}")
-                print(f"Generated[{ref_sample_id}]: {gen_text}")
+                best_generated = extract_predicted_from_generated(generated_all[0][0], tokenizer, encoder_inputs["input_ids"].size(1))
                 if run_wandb:
                     # Log to Weights & Biases
                     wandb.log(
@@ -414,7 +418,6 @@ def train(config: DictConfig):
                         tokenizer,
                         val_dataloader,
                         eval_cfg,
-                        tgt_lang_id=tgt_lang_id,
                         device=policy_device,
                         max_new_tokens=max_new_tokens,
                         split_name="eval",
@@ -426,7 +429,6 @@ def train(config: DictConfig):
             tokenizer,
             val_dataloader,
             eval_cfg,
-            tgt_lang_id=tgt_lang_id,
             device=policy_device,
             max_new_tokens=max_new_tokens,
             split_name="eval",
@@ -438,7 +440,6 @@ def train(config: DictConfig):
             tokenizer,
             test_dataloader,
             test_eval_cfg,
-            tgt_lang_id=tgt_lang_id,
             device=policy_device,
             max_new_tokens=max_new_tokens,
             split_name="test",

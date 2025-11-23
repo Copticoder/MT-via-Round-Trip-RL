@@ -12,7 +12,6 @@ from sacrebleu.metrics import CHRF, BLEU
 def grpo_generate_sequences(
     model,
     encoder_inputs,
-    tgt_lang_id,
     *,
     max_new_tokens: int,
     gen_temperature: float,
@@ -30,8 +29,7 @@ def grpo_generate_sequences(
     )
     gen = model.generate(
         input_ids=encoder_inputs["input_ids"],
-        attention_mask=encoder_inputs.get("attention_mask", None),
-        forced_bos_token_id=tgt_lang_id,
+        attention_mask=encoder_inputs["attention_mask"],
         **generation_kwargs,
     )
     return gen
