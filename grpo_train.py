@@ -383,7 +383,7 @@ def train(config: DictConfig):
 
                 print(
                     f"[epoch {epoch}] step {step_idx} (opt {optimizer_step}) | "
-                    f"f_loss={logs_forward['loss'].item():.4f} f_kl={logs_forward['kl'].item():.4f} f_reward={logs_forward['reward'].item():.4f} f_chrf={logs_forward['chrf'].item():.4f} | ppl={logs_forward['ppl'].item():.4f} |"
+                    f"f_loss={logs_forward['loss'].item():.4f} f_kl={logs_forward['kl'].item():.4f} f_reward={logs_forward['reward'].item():.4f} f_chrf={logs_forward['chrf'].item():.4f} | ppl={logs_forward['ppl'].item():.4f}"
                 )
                 # Print the reference and one generated sequence for inspection
                 best_candidates = []
@@ -395,6 +395,7 @@ def train(config: DictConfig):
                 ref_text, gen_text, ref_sample_id = best_candidates[0]
                 print(f"Reference[{ref_sample_id}]: {ref_text}")
                 best_generated = extract_predicted_from_generated(generated_all[0][0], tokenizer, encoder_inputs["input_ids"].size(1))
+                print(f"Hypothesis: {best_generated}")
                 if run_wandb:
                     # Log to Weights & Biases
                     wandb.log(

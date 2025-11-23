@@ -22,7 +22,7 @@ training:
   accumulate_grad_batches: 16
   epochs: 5
   batch_size: 2
-  num_return_sequences: 4
+  num_return_sequences: 3
   updates_per_batch: 1
   gen_temperature: 1.2
   beta: 0.04
