@@ -21,7 +21,7 @@ from utils import (
 from dl import TranslationDataModule
 from vllm import LLM, SamplingParams
 
-def extract_predicted_from_generated(generated, tokenizer, length_before_generation, sample_idx):
+def extract_predicted_from_generated(generated, tokenizer, length_before_generation):
     output_ids = generated[length_before_generation:].tolist()
     if not output_ids:
         return ""
@@ -311,15 +311,12 @@ def train(config: DictConfig):
                     # Generate candidate sequences with current policy
                     generated_local = grpo_generate_sequences(
                         model,
-                        tokenizer,
                         encoder_inputs,
-                        tgt_lang_id,
                         max_new_tokens=max_new_tokens,
                         gen_temperature=gen_temperature,
                         num_return_sequences=num_return_sequences,
                         top_k=int(getattr(config.task.training, "top_k", 100)),
                         top_p=float(getattr(config.task.training, "top_p", 0.95)),
-                        end_of_sentence_token_id=tokenizer.eos_token_id,
                         
                     )
                     
@@ -339,7 +336,7 @@ def train(config: DictConfig):
                         encoder_inputs,
                         generated_all,
                         ground_truths,
-                        end_of_sentence_token_id=tokenizer.eos_token_id,
+                        end_of_sentence_token_id=  151643, # <|endoftext|> token id for qwen3
                         beta=beta,
                         clip_param=clip_param,
                         tgt_lang_id=tgt_lang_id,
@@ -352,71 +349,6 @@ def train(config: DictConfig):
                     loss_scale = 1.0 / float(grad_accum_steps)
                     loss_forward = loss_forward * loss_scale
                     loss_forward.backward()
-                    # Prepare backward direction prompts from generated target sentences
-                    forward_generated_flat = generated_all.reshape(
-                        batch_size * num_return_sequences, seq_len
-                    )
-                    forward_prompt_texts = tokenizer.batch_decode(
-                        forward_generated_flat, skip_special_tokens=True
-                    )
-                    backward_inputs_encoded = _tokenize_with_lang(
-                        forward_prompt_texts, target_lang_code
-                    )
-                    backward_inputs = {
-                        k: v.to(policy_device, non_blocking=True)
-                        for k, v in backward_inputs_encoded.items()
-                    }
-                    backward_batch_size = backward_inputs["input_ids"].size(0)
-                    generated_backward = grpo_generate_sequences(
-                        model,
-                        tokenizer,
-                        backward_inputs,
-                        src_lang_id,
-                        max_new_tokens=max_new_tokens,
-                        gen_temperature=gen_temperature,
-                        num_return_sequences=num_return_sequences,
-                        top_k=int(getattr(config.task.training, "top_k", 100)),
-                        top_p=float(getattr(config.task.training, "top_p", 0.95)),
-                        end_of_sentence_token_id=tokenizer.eos_token_id,
-                    )
-
-                    back_seq_len = generated_backward.size(1)
-                    try:
-                        generated_backward_all = generated_backward.reshape(
-                            backward_batch_size, num_return_sequences, back_seq_len
-                        )
-                    except RuntimeError as exc:
-                        raise RuntimeError(
-                            "Unable to reshape backward generated sequences into "
-                            "(batch_size, num_return_sequences, seq_len). "
-                            f"Batch size={backward_batch_size}, num_return_sequences={num_return_sequences}, "
-                            f"seq_len={back_seq_len}."
-                        ) from exc
-
-                    expanded_source_texts = [
-                        source_texts[idx // num_return_sequences]
-                        for idx in range(backward_batch_size)
-                    ]
-
-                    loss_backward, logs_backward = grpo_compute_loss_and_logs(
-                        model,
-                        ref_model,
-                        tokenizer,
-                        backward_inputs,
-                        generated_backward_all,
-                        expanded_source_texts,
-                        end_of_sentence_token_id=tokenizer.eos_token_id,
-                        beta=beta,
-                        clip_param=clip_param,
-                        tgt_lang_id=src_lang_id,
-                        # length_penalty_weight=float(getattr(config.task.reward, "length_penalty_weight", 0.0)),
-                        # goldfish_model=perplexity_model,
-                        # goldfish_tokenizer=perplexity_tokenizer,
-                        # goldfish_reward_weight=float(getattr(config.task.reward, "goldfish_reward_weight", 0.5)),
-                    )
-
-                    loss_scale = 1.0 / float(grad_accum_steps)
-                    (loss_backward * loss_scale).backward()
                     performed_optimizer_step = False
                     accum_steps_since_update += 1
                     if accum_steps_since_update >= grad_accum_steps:
@@ -447,8 +379,7 @@ def train(config: DictConfig):
 
                 print(
                     f"[epoch {epoch}] step {step_idx} (opt {optimizer_step}) | "
-                    f"f_loss={logs_forward['loss'].item():.4f} f_kl={logs_forward['kl'].item():.4f} f_reward={logs_forward['reward'].item():.4f} f_chrf={logs_forward['chrf'].item():.4f} | ppl={logs_forward['ppl'].item():.4f} | "
-                    f"b_loss={logs_backward['loss'].item():.4f} b_kl={logs_backward['kl'].item():.4f} b_reward={logs_backward['reward'].item():.4f} b_chrf={logs_backward['chrf'].item():.4f} b_bleu={logs_backward['bleu'].item():.4f} b_ppl={logs_backward['ppl'].item():.4f}"
+                    f"f_loss={logs_forward['loss'].item():.4f} f_kl={logs_forward['kl'].item():.4f} f_reward={logs_forward['reward'].item():.4f} f_chrf={logs_forward['chrf'].item():.4f} | ppl={logs_forward['ppl'].item():.4f} |"
                 )
                 # Print the reference and one generated sequence for inspection
                 best_candidates = []
@@ -456,24 +387,19 @@ def train(config: DictConfig):
                     decoded = tokenizer.decode(
                         generated_all[idx, 0], skip_special_tokens=True
                     )
-                    best_candidates.append((reference, decoded, source_texts[idx], sample_ids[idx]))
-                ref_text, gen_text, src_text, ref_sample_id = best_candidates[0]
-                print(f"Source[{ref_sample_id}]: {src_text}")
+                    best_candidates.append((reference, decoded, sample_ids[idx]))
+                ref_text, gen_text, ref_sample_id = best_candidates[0]
                 print(f"Reference[{ref_sample_id}]: {ref_text}")
                 print(f"Generated[{ref_sample_id}]: {gen_text}")
-                back_best = tokenizer.decode(
-                        generated_backward_all[0, 0], skip_special_tokens=True
-                    )
-                print(f"Back-Generated[{ref_sample_id}]: {back_best}")
                 if run_wandb:
                     # Log to Weights & Biases
                     wandb.log(
                         {
-                            "train/backward_loss": float(logs_backward["loss"].item()),
-                            "train/backward_kl": float(logs_backward["kl"].item()),
-                            "train/backward_chrf": float(logs_backward["chrf"].item()),
-                            "train/backward_reward": float(logs_backward["reward"].item()),
-                            "train/backward_bleu": float(logs_backward["bleu"].item()),
+                            "train/loss": float(logs_forward["loss"].item()),
+                            "train/kl": float(logs_forward["kl"].item()),
+                            "train/reward": float(logs_forward["reward"].item()),
+                            "train/chrf": float(logs_forward["chrf"].item()),
+                            "train/ppl": float(logs_forward["ppl"].item()),
                         }
                     )
                 step_idx += 1
@@ -536,8 +462,9 @@ def get_model(config: DictConfig):
     tokenizer = AutoTokenizer.from_pretrained(
         model_cfg.name, padding_side="left"
     )
+    tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        model_cfg.name, dtype=torch.float16
+        model_cfg.name
     )
 
     use_lora = bool(getattr(model_cfg, "use_lora", False))

@@ -115,7 +115,7 @@ class TranslationDataModule(LightningDataModule):
 
     def _collate_batch(self, batch):
         few_shot_prompt = """
-        Your task is to translate between English and {language}. Here are some examples:\n\nExample 1:\n\nEnglish: We got up a five a.m. and took a 3 mile jaunt all around our neighborhood. It was great exercise and a great way to start the day! How did your day start today?\n{language}: Phisqha alwa pachaw sartapxta ukatx utaj jak’an 3 millas ukaruw muytir sarapxta. Jichhürux kusapuniw ukham muytir sarañaxa! Jumatakist kunjamakis jichhüruxa?\n\nExample 2:\n\nEnglish: It would be awesome to go to one of your shows! Do you have anything coming up?\n{language}: Walikipuniw jutawa! Jutir urutak utjtamti?\n\nNow your turn. Translate the following English sentence into {language}:\n\nEnglish: {source_text}\n{language}: """
+        Your task is to translate between English and {language}. Here are some examples:\n\nExample 1:\n\nEnglish: We got up a five a.m. and took a 3 mile jaunt all around our neighborhood. It was great exercise and a great way to start the day! How did your day start today?\n{language}: Phisqha alwa pachaw sartapxta ukatx utaj jak’an 3 millas ukaruw muytir sarapxta. Jichhürux kusapuniw ukham muytir sarañaxa! Jumatakist kunjamakis jichhüruxa?\n\nExample 2:\n\nEnglish: It would be awesome to go to one of your shows! Do you have anything coming up?\n{language}: Walikipuniw jutawa! Jutir urutak utjtamti?\n\nNow your turn. Translate the following English sentence into {language}:\n\nEnglish: {source_text}"""
         encoder_texts, targets, sample_ids = zip(*batch)
         inputs = []
         for encoder_text in encoder_texts:
@@ -128,6 +128,7 @@ class TranslationDataModule(LightningDataModule):
                 add_generation_prompt=True,
                 enable_thinking=False
 )
+            text+= f"{language_mapping[self.hparams.target_lang]}: "
             inputs.append(text)
         
         batch_encoding = self.tokenizer(
