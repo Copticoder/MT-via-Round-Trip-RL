@@ -472,6 +472,7 @@ def train(config: DictConfig):
                             "train/backward_chrf": float(logs_backward["chrf"].item()),
                             "train/backward_reward": float(logs_backward["reward"].item()),
                             "train/backward_bleu": float(logs_backward["bleu"].item()),
+                            "train/forward_ppl": float(logs_forward["ppl"].item()),
                         }
                     )
                 step_idx += 1
