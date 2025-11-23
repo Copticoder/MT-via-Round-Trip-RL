@@ -201,7 +201,7 @@ def train(config: DictConfig):
 
     # Initialize Weights & Biases
     model_name_for_run = str(getattr(config.task.model, "name", "model")).replace("/", "-")
-    run_name = f"grpo_{model_name_for_run}_outcome_reward_batch_{config.task.training.batch_size}_src_tgt_src_grad_accum_self-supervised_rus"
+    run_name = f"grpo_{model_name_for_run}_outcome_reward_batch_{config.task.training.batch_size}_src_tgt_src_ppl_grad_accum_self-supervised_rus_restart"
     run_wandb = bool(getattr(config.task.training, "use_wandb", True))
     if run_wandb:
         wandb.init(
