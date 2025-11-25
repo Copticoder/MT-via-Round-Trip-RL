@@ -214,9 +214,6 @@ def grpo_compute_loss_and_logs(
     chrf_scores = []
     bleu_scores = []
     ppl_scores = []
-    chrf_scores = []
-    bleu_scores = []
-    ppl_scores = []
 
     is_english = tgt_lang_id == 256047
 
