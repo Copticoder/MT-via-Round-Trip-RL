@@ -1,7 +1,6 @@
 defaults:
   - _self_
   - task: nllb_md
-  - device: gpu
   - hydra: default
 
 seed: 27

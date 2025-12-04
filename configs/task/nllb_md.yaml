@@ -3,29 +3,23 @@ name: "nllb-multi-domain"
 data:
   path: "breakend/nllb-multi-domain"
   source_lang: eng_Latn
-  target_lang: rus_Cyrl
-  dataset_config_name: "eng_Latn-rus_Cyrl"
+  target_lang: ayr_Latn
+  dataset_config_name: "eng_Latn-ayr_Latn"
 
 model:
   # name: "facebook/nllb-200-distilled-1.3B"
   name: "facebook/nllb-200-distilled-600M"
   # name: "model/"
   # name: "facebook/nllb-200-3.3B"
-  use_lora: false
-  lora:
-    r: 8
-    alpha: 32
-    dropout: 0.05
-    target_modules:
-      - q_proj
-      - v_proj
+  # perplexity_model_name: "goldfish-models/rus_Cyrl_1000mb"
+  perplexity_model_name: "goldfish-models/ayr_Latn_full"
 
 training:
-  lr: 0.000003
+  lr: 0.000005
   accumulate_grad_batches: 16
-  epochs: 5
+  epochs: 1
   batch_size: 2
-  num_return_sequences: 3
+  num_return_sequences: 4
   updates_per_batch: 1
   gen_temperature: 1.8
   beta: 0.04
@@ -48,10 +42,11 @@ test:
 
 reward:
   # MT reward settings (BLEU and chrF++)
-  bleu_weight: 0.0  # Weight for BLEU score
+  bleu_weight: 0.5  # Weight for BLEU score
   chrf_weight: 0.5  # Weight for chrF++ score
   length_penalty_weight: 0.1
-  goldfish_reward_weight: 0.4
+  goldfish_reward_weight: 1
+
 constraints: 
   min_sentence_len: 1
   max_sentence_len: 63 # excluding first eos and langid tokens
