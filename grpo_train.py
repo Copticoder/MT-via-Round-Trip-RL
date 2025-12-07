@@ -113,7 +113,7 @@ def _run_evaluation(
 
     if wandb_run is not None and (results or sample_records):
         # log the sample records 5 times across training steps
-        if step_idx % (total_training_steps / 10) == 0 and split_name == "eval":
+        if step_idx % (total_training_steps / 20) == 0 and split_name == "eval":
             for reference, hypothesis, source_text, sample_id, step in sample_records:
                 wandb_table.add_data(reference, hypothesis, sample_id, step)
         if split_name == "test":
@@ -143,14 +143,14 @@ def train(config: DictConfig):
     model, tokenizer = get_model(config)
     model.to(policy_device)
     # Perplexity model for rewarding the generated sequences
-    # perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_full")
-    # perplexity_model = AutoModelForCausalLM.from_pretrained(
-    #     f"goldfish-models/{config.task.data.target_lang}_full", config=perplexity_config
-    # )
-    # perplexity_tokenizer = AutoTokenizer.from_pretrained(
-    #     f"goldfish-models/{config.task.data.target_lang}_full"
-    # )
-    # perplexity_model.to(aux_device)
+    perplexity_config = AutoConfig.from_pretrained(f"goldfish-models/{config.task.data.target_lang}_full")
+    perplexity_model = AutoModelForCausalLM.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_full", config=perplexity_config
+    )
+    perplexity_tokenizer = AutoTokenizer.from_pretrained(
+        f"goldfish-models/{config.task.data.target_lang}_full"
+    )
+    perplexity_model.to(aux_device)
     source_lang_code = config.task.data.source_lang
     target_lang_code = config.task.data.target_lang
     if hasattr(tokenizer, "src_lang"):
@@ -195,7 +195,7 @@ def train(config: DictConfig):
 
     # Initialize Weights & Biases
     model_name_for_run = str(getattr(config.task.model, "name", "model")).replace("/", "-")
-    run_name = f"{model_name_for_run}_outcome_batch_{config.task.training.batch_size}_src_tgt_src_{target_lang_code}"
+    run_name = f"{model_name_for_run}_outcome_batch_{config.task.training.batch_size}_src_tgt_src_ppl_{target_lang_code}"
     run_wandb = bool(getattr(config.task.training, "use_wandb", True))
     wandb_table = None
     wandb_run = None
@@ -255,8 +255,11 @@ def train(config: DictConfig):
     tgt_lang_id = tokenizer.convert_tokens_to_ids(target_lang_code)
     src_lang_id = tokenizer.convert_tokens_to_ids(source_lang_code)
 
+    checkpoint_root = None
     # Optimizer setup
     if run_training:
+        checkpoint_root = os.path.join(os.getcwd(), f"checkpoints_{model_name_for_run}_src_tgt_{source_lang_code}-{target_lang_code}")
+        os.makedirs(checkpoint_root, exist_ok=True)
         trainable_params = [p for p in model.parameters() if p.requires_grad]
         if not trainable_params:
             raise ValueError("No trainable parameters found for the optimizer.")
@@ -272,6 +275,7 @@ def train(config: DictConfig):
         )
         accum_steps_since_update = 0
         optimizer_step = 0
+        num_data_samples_processed = 0
     if run_eval:
         _run_evaluation(
             model,
@@ -321,7 +325,28 @@ def train(config: DictConfig):
                             "Unable to reshape generated sequences into (batch_size, num_return_sequences, seq_len). "
                             f"Batch size={batch_size}, num_return_sequences={num_return_sequences}, seq_len={seq_len}."
                         ) from exc
+                                         # Compute GRPO loss and update model
+                    loss_forward, logs_forward = grpo_compute_loss_and_logs(
+                        model,
+                        ref_model,
+                        tokenizer,
+                        encoder_inputs,
+                        generated_all,
+                        ground_truths,
+                        end_of_sentence_token_id=tokenizer.eos_token_id,
+                        beta=beta,
+                        clip_param=clip_param,
+                        tgt_lang_id=tgt_lang_id,
+                        length_penalty_weight=float(getattr(config.task.reward, "length_penalty_weight", 0.0)),
+                        goldfish_model=perplexity_model,
+                        goldfish_tokenizer=perplexity_tokenizer,
+                        goldfish_reward_weight=float(getattr(config.task.reward, "goldfish_reward_weight", 0.5)),
+                    )
                     
+                    loss_scale = 1.0 / float(grad_accum_steps)
+                    loss_forward = loss_forward * loss_scale
+                    loss_forward.backward()
+
                     # Prepare backward direction prompts from generated target sentences
                     forward_generated_flat = generated_all.reshape(
                         batch_size * num_return_sequences, seq_len
@@ -399,7 +424,7 @@ def train(config: DictConfig):
                             ref_model.eval()
                             for p in ref_model.parameters():
                                 p.requires_grad_(False)
-
+                num_data_samples_processed += batch_size
                 updates_per_batch += getattr(config.task.training, "updates_per_batch", 50)
                 if run_eval and eval_every_n_opt_steps > 0 and (optimizer_step % eval_every_n_opt_steps == 0):
                     _run_evaluation(
@@ -419,7 +444,7 @@ def train(config: DictConfig):
 
                 print(
                     f"[epoch {epoch}] step {step_idx} (opt {optimizer_step}) | "
-                    f"b_loss={logs_backward['loss'].item():.4f} b_kl={logs_backward['kl'].item():.4f} b_reward={logs_backward['reward'].item():.4f} b_chrf={logs_backward['chrf'].item():.4f} b_bleu={logs_backward['bleu'].item():.4f}"
+                    f"b_loss={logs_backward['loss'].item():.4f} b_kl={logs_backward['kl'].item():.4f} b_reward={logs_backward['reward'].item():.4f} b_chrf={logs_backward['chrf'].item():.4f} b_bleu={logs_backward['bleu'].item():.4f} | num_data_samples_processed={num_data_samples_processed}"
                 )
                 # Print the reference and one generated sequence for inspection
                 best_candidates = []
@@ -445,6 +470,8 @@ def train(config: DictConfig):
                             "train/backward_chrf": float(logs_backward["chrf"].item()),
                             "train/backward_reward": float(logs_backward["reward"].item()),
                             "train/backward_bleu": float(logs_backward["bleu"].item()),
+                            "train/forward_ppl": float(logs_forward["ppl"].item()),
+                            "train/forward_chrf": float(logs_forward["chrf"].item()),
                         }
                     )
                     # if train_table is not None:
@@ -456,6 +483,12 @@ def train(config: DictConfig):
                     #         )
                     #     wandb.log({"train/Translations": train_table}, step=step_idx)
                 step_idx += 1
+
+            if checkpoint_root is not None:
+                epoch_save_dir = os.path.join(checkpoint_root, f"epoch_{epoch:03d}")
+                os.makedirs(epoch_save_dir, exist_ok=True)
+                model.save_pretrained(epoch_save_dir)
+                tokenizer.save_pretrained(epoch_save_dir)
 
     if run_eval and not eval_only:
         _run_evaluation(
@@ -491,10 +524,10 @@ def train(config: DictConfig):
 
     # Save final model when training occurred
     if run_training:
-        save_dir = os.path.join(os.getcwd(), "model")
-        os.makedirs(save_dir, exist_ok=True)
-        model.save_pretrained(save_dir)
-        tokenizer.save_pretrained(save_dir)
+        final_dir = os.path.join(checkpoint_root, "final")
+        os.makedirs(final_dir, exist_ok=True)
+        model.save_pretrained(final_dir)
+        tokenizer.save_pretrained(final_dir)
 
     if wandb.run is not None:
         wandb.finish()
