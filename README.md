@@ -26,4 +26,5 @@ For running the baselines, you can directly run the bash scripts in the `baselin
 ```bash
 bash baselines/backtranslation/run_backtranslation.sh
 bash baselines/UMNMT/run_training.sh
+bash baselines/roundtrip-bt/run_roundtrip_bt.sh
 ```
